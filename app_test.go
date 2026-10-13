@@ -27,6 +27,10 @@ func (d *fakeDelivery) Discard(context.Context, *amqp.Error) error {
 }
 func (d *fakeDelivery) DiscardWithAnnotations(context.Context, amqp.Annotations) error { return nil }
 func (d *fakeDelivery) RequeueWithAnnotations(context.Context, amqp.Annotations) error { return nil }
+func (d *fakeDelivery) RequeueWithAnnotationsAndDeliveryFailed(context.Context, amqp.Annotations, bool) error {
+	return nil
+}
+func (d *fakeDelivery) DelayRetry(context.Context, time.Duration, bool) error { return nil }
 
 // testProcessor 用于测试的处理器
 type testProcessor struct {

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -23,6 +24,23 @@ import (
 type RabbitMQConfig struct {
 	*RabbitInfo
 	Consumers []ConsumersConfig `yaml:"consumers" json:"consumers"`
+
+	wg sync.WaitGroup // 跟踪Start启动的全部协程，供Wait等待退出
+}
+
+// Wait 等待Start启动的协程全部退出（需先取消传给Start的ctx），超时返回false
+func (r *RabbitMQConfig) Wait(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Start 按配置启动全部消费者，handles的key对应consumer.name
@@ -61,9 +79,11 @@ func (r *RabbitMQConfig) Start(ctx context.Context, handles map[string][]Process
 		}
 
 		instance := objects[0]
+		r.wg.Add(1)
 		simple.SafeGo(ctx, func(ctx context.Context) {
+			defer r.wg.Done()
 			g.Log().Infof(ctx, "start topic %s@%s", item.Name, instance.Name())
-			item.Run(ctx, r.RabbitInfo, instance)
+			item.run(ctx, r.RabbitInfo, instance, &r.wg)
 		})
 	}
 }
@@ -125,6 +145,11 @@ type ConsumersConfig struct {
 
 // Run 按Num启动多个消费者协程，它们共同消费同一个队列，由RabbitMQ负责分发
 func (r *ConsumersConfig) Run(ctx context.Context, info *RabbitInfo, handle ProcessorInterface) {
+	r.run(ctx, info, handle, nil)
+}
+
+// run 在wg不为空时登记启动的消费者协程。调用方需已在wg中占位，保证Add发生在Wait归零之前
+func (r *ConsumersConfig) run(ctx context.Context, info *RabbitInfo, handle ProcessorInterface, wg *sync.WaitGroup) {
 	num := r.Num
 	if num <= 0 {
 		num = 1
@@ -145,9 +170,16 @@ func (r *ConsumersConfig) Run(ctx context.Context, info *RabbitInfo, handle Proc
 	for i := 0; i < num; i++ {
 		queues = append(queues, ShardQueueName(r.Queue, i, num))
 	}
-	if err := NewBind(ctx, info, r.ConsumerInfo, queues); err != nil {
-		g.Log().Errorf(ctx, "declare topic %s@%s failed, consumers not started: %+v", r.Name, r.Queue, err)
-		return
+	// 声明失败多为RabbitMQ暂不可用，按重连间隔重试，直到成功或ctx被取消
+	for {
+		err := NewBind(ctx, info, r.ConsumerInfo, queues)
+		if err == nil {
+			break
+		}
+		g.Log().Warningf(ctx, "declare topic %s@%s failed, retrying: %+v", r.Name, r.Queue, err)
+		if !sleepOrDone(ctx, reconnectInterval()) {
+			return
+		}
 	}
 
 	for i := 0; i < num; i++ {
@@ -156,7 +188,13 @@ func (r *ConsumersConfig) Run(ctx context.Context, info *RabbitInfo, handle Proc
 		instance.Set("key", fmt.Sprintf("%s:%s:%s:%03d", info.Exchange, r.Name, instance.Name(), index))
 		instance.Set("index", index)
 
+		if wg != nil {
+			wg.Add(1)
+		}
 		simple.SafeGo(ctx, func(ctx context.Context) {
+			if wg != nil {
+				defer wg.Done()
+			}
 			g.Log().Infof(ctx, "start -> %s@%s-%03d -> %03d", r.Name, instance.Name(), index, num)
 			app := &ApplicationContext{
 				AppName:   info.Exchange,
