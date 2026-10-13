@@ -46,7 +46,7 @@ func (r *RabbitMQConfig) Wait(timeout time.Duration) bool {
 // Start 按配置启动全部消费者，handles的key对应consumer.name
 func (r *RabbitMQConfig) Start(ctx context.Context, handles map[string][]ProcessorInterface) {
 	if r == nil || r.RabbitInfo == nil {
-		g.Log().Error(ctx, "rabbitmq topic config is empty, nothing to start")
+		g.Log().Warning(ctx, "rabbitmq topic config is empty, nothing to start")
 		return
 	}
 
